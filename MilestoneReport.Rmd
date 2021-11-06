@@ -1,0 +1,337 @@
+---
+title: "Data Science Capstone - Milestone Report"
+author: "Christian Thyssen"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Synopsis
+
+We investigate three data sets containing documents from the United States.
+The sources of these data sets are blogs, news, and twitter.
+This is a preparation for the next step, in which we will build a prediction model for predicting the next word a user might want to enter.
+We conclude with an outlook on the next steps.
+
+## Setup
+
+We load the libraries we decided to use.
+We utilize the package `quanteda` (and its associated packages) to build the corpus, the tokens, and the document-feature matrix (DFM).
+Furthermore, we use the packages `ggplot2` and `gridExtra` for plotting.
+
+```{r, warning=FALSE, message=FALSE}
+library(quanteda)
+library(quanteda.textstats)
+library(quanteda.textplots)
+library(ggplot2)
+library(gridExtra)
+```
+
+To make all results reproducible we set the seed of the random number generator.
+
+```{r}
+set.seed(1)
+```
+
+## Getting the Data
+
+We download and extract the data.
+
+```{r}
+archive_name <- "Coursera-SwiftKey.zip"
+url <- paste0(
+    "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/",
+    archive_name
+)
+if (!file.exists(archive_name)) download.file(url, archive_name)
+unzip(archive_name)
+```
+
+Next, we read the files that contain English documents from the United States.
+
+```{r}
+blogs_file_name <- "en_US.blogs.txt"
+blogs_file_path <- file.path("final", "en_US", blogs_file_name)
+blogs_docs <- readLines(blogs_file_path, warn = FALSE, encoding = "UTF-8", skipNul = TRUE)
+
+news_file_name <- "en_US.news.txt"
+news_file_path <- file.path("final", "en_US", news_file_name)
+news_docs <- readLines(news_file_path, warn = FALSE, encoding = "UTF-8", skipNul = TRUE)
+
+twitter_file_name <- "en_US.twitter.txt"
+twitter_file_path <- file.path("final", "en_US", twitter_file_name)
+twitter_docs <- readLines(twitter_file_path, warn = FALSE, encoding = "UTF-8", skipNul = TRUE)
+```
+
+## Basic Summaries
+
+We start with a basic summary of the data sets.
+It contains the file name, the file size (in MB), the number of characters, the number of words, the number of lines, and the minimum, mean, and maximum number of words per line (WPL).
+Before counting the number of words, we remove punctuation, symbols, numbers, URLs, and separators.
+
+```{r}
+count_words_per_line <- function(x) {
+    ntoken(
+        x,
+        remove_punct = TRUE,
+        remove_symbols = TRUE,
+        remove_numbers = TRUE,
+        remove_url = TRUE,
+        remove_separators = TRUE
+    )
+}
+
+docs <- list(blogs_docs, news_docs, twitter_docs)
+words_per_line <- sapply(docs, count_words_per_line)
+
+data.frame(
+    file = c(blogs_file_name, news_file_name, twitter_file_name),
+    size = round(file.info(c(blogs_file_path, news_file_path, twitter_file_path))$size / 10 ^ 6),
+    characters = sapply(docs, function(x) sum(nchar(x))),
+    words = sapply(words_per_line, sum),
+    lines = sapply(docs, length),
+    wpl_min = sapply(words_per_line, min),
+    wpl_mean = sapply(words_per_line, function(x) round(mean(x))),
+    wpl_max = sapply(words_per_line, max)
+)
+```
+
+Now, we compare the distributions of the words per line.
+
+```{r}
+plot1 <- data.frame(wpl = words_per_line[[1]]) %>%
+    ggplot(aes(wpl)) +
+    geom_histogram(binwidth = 5, boundary = 0) +
+    labs(x = "Words per Line", y = "Frequency", title = "US Blogs")
+
+plot2 <- data.frame(wpl = words_per_line[[2]]) %>%
+    ggplot(aes(wpl)) +
+    geom_histogram(binwidth = 5, boundary = 0) +
+    labs(x = "Words per Line", y = "Frequency", title = "US News")
+
+plot3 <- data.frame(wpl = words_per_line[[3]]) %>%
+    ggplot(aes(wpl)) +
+    geom_histogram(binwidth = 5, boundary = 0) +
+    labs(x = "Words per Line", y = "Frequency", title = "US Twitter")
+
+grid.arrange(plot1, plot2, plot3, nrow = 3)
+```
+
+## Cleaning the Data
+
+### Reducing the Data
+
+Before we proceed, we reduce the size of the data.
+Therefore, we randomly choose 1 % of the lines from each file.
+
+```{r}
+create_sample_file <- function(source_file_path, sample_file_path, sample_prob = .01) {
+    lines <- readLines(source_file_path, warn = FALSE, encoding = "UTF-8", skipNul = TRUE)
+    writeLines(
+        sample(lines, length(lines) * sample_prob),
+        sample_file_path
+    )
+}
+
+sample_blogs_file_path <- file.path("final", "en_US", "en_US.blogs.sample.txt")
+create_sample_file(blogs_file_path, sample_blogs_file_path)
+
+sample_news_file_path <- file.path("final", "en_US", "en_US.blogs.sample.txt")
+create_sample_file(news_file_path, sample_news_file_path)
+
+sample_twitter_file_path <- file.path("final", "en_US", "en_US.blogs.sample.txt")
+create_sample_file(twitter_file_path, sample_twitter_file_path)
+```
+
+### Creating the Corpus
+
+We create three corpora from the sample files.
+Then, we combine these into a single corpus.
+
+```{r}
+sample_blogs_docs <- readLines(sample_blogs_file_path, warn = FALSE, encoding = "UTF-8", skipNul = TRUE)
+sample_news_docs <- readLines(sample_news_file_path, warn = FALSE, encoding = "UTF-8", skipNul = TRUE)
+sample_twitter_docs <- readLines(sample_twitter_file_path, warn = FALSE, encoding = "UTF-8", skipNul = TRUE)
+
+blogs_corp <- corpus(sample_blogs_docs, docnames = paste0("blogs", 1:length(sample_blogs_docs)))
+news_corp <- corpus(sample_news_docs, docnames = paste0("news", 1:length(sample_news_docs)))
+twitter_corp <- corpus(sample_twitter_docs, docnames = paste0("twitter", 1:length(sample_twitter_docs)))
+
+corp <- blogs_corp + news_corp + twitter_corp
+```
+
+### Creating the Unigrams
+
+We create the unigrams from the corpus.
+Before tokenizing the text, we remove punctuation, symbols, numbers, URLs, and separators.
+Afterwards we create the document-feature matrix from the unigrams and sort it from common to uncommon.
+
+```{r}
+toks_unigrams <- tokens(
+    corp,
+    remove_punct = TRUE,
+    remove_symbols = TRUE,
+    remove_numbers = TRUE,
+    remove_url = TRUE,
+    remove_separators = TRUE
+)
+dfmat_unigrams <- dfm(toks_unigrams)
+dfmat_unigrams <- dfm_sort(dfmat_unigrams)
+```
+
+### Creating the Bigrams
+
+We create the bigrams from the unigrams.
+Afterwards we create the document-feature matrix from the bigrams and sort it from common to uncommon.
+
+```{r}
+toks_bigrams <- tokens_ngrams(toks_unigrams, n = 2, concatenator = " ")
+dfmat_bigrams <- dfm(toks_bigrams)
+dfmat_bigrams <- dfm_sort(dfmat_bigrams)
+```
+
+### Creating the Trigrams
+
+We create the trigrams from the unigrams.
+Afterwards we create the document-feature matrix from the trigrams and sort it from common to uncommon.
+
+```{r}
+toks_trigrams <- tokens_ngrams(toks_unigrams, n = 3, concatenator = " ")
+dfmat_trigrams <- dfm(toks_trigrams)
+dfmat_trigrams <- dfm_sort(dfmat_trigrams)
+```
+
+## Exploratory Data Analysis
+
+### Unigrams
+
+We plot the 20 most common *unigrams* and their frequency.
+
+```{r}
+dfmat_unigrams %>%
+    textstat_frequency(n = 20) %>%
+    ggplot(aes(x = reorder(feature, -frequency), y = frequency)) +
+    geom_col() +
+    labs(x = "", y = "Frequency", title = "20 Most Common Unigrams") +
+    theme(axis.text.x = element_text(hjust = 1, angle = 45))
+```
+
+The most common unigram occurs `r format(textstat_frequency(dfmat_unigrams, 1)$frequency, big.mark = ",")` times.
+
+As an alternative visualization we plot a word cloud containing the 20 most common *unigrams*.
+
+```{r}
+textplot_wordcloud(dfmat_unigrams, max_words = 20)
+```
+
+Next, we investigate how many *unigrams* match the n most common *unigrams*.
+
+```{r}
+data.frame(
+    unigrams = 0:ncol(dfmat_unigrams),
+    coverage = c(0, cumsum(colSums(dfmat_unigrams) / sum(dfmat_unigrams)))
+) %>%
+    ggplot(aes(x = unigrams, y = coverage)) +
+    geom_line() +
+    labs(x = "Number of Most Common Unigrams", y = "Coverage", title = "Coverage of the Most Common Unigrams")
+```
+
+Hence, we need `r format(sum(cumsum(colSums(dfmat_unigrams) / sum(dfmat_unigrams)) < .8) + 1, big.mark = ",")` *unigrams* to cover at least 80 % of all *unigrams*.
+
+### Bigrams
+
+We plot the 20 most common *bigrams* and their frequency.
+
+```{r}
+dfmat_bigrams %>%
+    textstat_frequency(n = 20) %>%
+    ggplot(aes(x = reorder(feature, -frequency), y = frequency)) +
+    geom_col() +
+    labs(x = "", y = "Frequency", title = "20 Most Common Bigrams") +
+    theme(axis.text.x = element_text(hjust = 1, angle = 45))
+```
+
+The most common bigram occurs `r format(textstat_frequency(dfmat_bigrams, 1)$frequency, big.mark = ",")` times.
+
+As an alternative visualization we plot a word cloud containing the 20 most common *bigrams*.
+
+```{r}
+textplot_wordcloud(dfmat_bigrams, max_words = 20)
+```
+
+Next, we investigate how many *bigrams* match the n most common *bigrams*.
+
+```{r}
+data.frame(
+    bigrams = 0:ncol(dfmat_bigrams),
+    coverage = c(0, cumsum(colSums(dfmat_bigrams) / sum(dfmat_bigrams)))
+) %>%
+    ggplot(aes(x = bigrams, y = coverage)) +
+    geom_line() +
+    labs(x = "Number of Most Common Bigrams", y = "Coverage", title = "Coverage of the Most Common Bigrams")
+```
+
+Hence, we need `r format(sum(cumsum(colSums(dfmat_bigrams) / sum(dfmat_bigrams)) < .8) + 1, big.mark = ",")` *bigrams* to cover at least 80 % of all *bigrams*.
+
+### Trigrams
+
+We plot the 20 most common *trigrams* and their frequency.
+
+```{r}
+dfmat_trigrams %>%
+    textstat_frequency(n = 20) %>%
+    ggplot(aes(x = reorder(feature, -frequency), y = frequency)) +
+    geom_col() +
+    labs(x = "", y = "Frequency", title = "20 Most Common Trigrams") +
+    theme(axis.text.x = element_text(hjust = 1, angle = 45))
+```
+
+The most common trigram occurs `r format(textstat_frequency(dfmat_trigrams, 1)$frequency, big.mark = ",")` times.
+
+As an alternative visualization we plot a word cloud containing the 20 most common *trigrams*.
+
+```{r}
+textplot_wordcloud(dfmat_trigrams, max_words = 20)
+```
+
+Next, we investigate how many *trigrams* match the n most common *trigrams*.
+
+```{r}
+data.frame(
+    trigrams = 0:ncol(dfmat_trigrams),
+    coverage = c(0, cumsum(colSums(dfmat_trigrams) / sum(dfmat_trigrams)))
+) %>%
+    ggplot(aes(x = trigrams, y = coverage)) +
+    geom_line() +
+    labs(x = "Number of Most Common Trigrams", y = "Coverage", title = "Coverage of the Most Common Trigrams")
+```
+
+Hence, we need `r format(sum(cumsum(colSums(dfmat_trigrams) / sum(dfmat_trigrams)) < .8) + 1, big.mark = ",")` *trigrams* to cover at least 80 % of all *trigrams*.
+
+### Comparison of Unigrams, Bigrams, and Trigrams
+
+On one hand, the frequency of the most common n-gram declines rapidly from `r format(textstat_frequency(dfmat_unigrams, 1)$frequency, big.mark = ",")` (unigrams) over `r format(textstat_frequency(dfmat_bigrams, 1)$frequency, big.mark = ",")` (bigrams) to `r format(textstat_frequency(dfmat_trigrams, 1)$frequency, big.mark = ",")` (trigrams).
+
+On the other hand, the number of n-grams needed to cover 80 % of all n-grams increases rapidly from `r format(sum(cumsum(colSums(dfmat_unigrams) / sum(dfmat_unigrams)) < .8) + 1, big.mark = ",")` (unigrams) over `r format(sum(cumsum(colSums(dfmat_bigrams) / sum(dfmat_bigrams)) < .8) + 1, big.mark = ",")` (bigrams) to `r format(sum(cumsum(colSums(dfmat_trigrams) / sum(dfmat_trigrams)) < .8) + 1, big.mark = ",")` (trigrams).
+
+## Outlook
+
+The basic idea of the prediction algorithm is as follows.
+We use n-grams to predict from the last n-1 given words the next word.
+Therefore, we select the n-grams whose first n-1 words match the last n-1 given words.
+From these n-grams we select an n-gram and use its n-th word as a prediction for the next word.
+
+A deterministic approach is to select the n-gram with the highest frequency.
+A probabilistic approach is to select an n-gram randomly, with the probability of selecting an n-gram being proportional to its frequency.
+
+When there are no n-grams matching the last n-1 given words, we repeat the same procedure with the last n-2 given words and the (n-1)-grams.
+In the end, we don't use any given words but select a word from the unigrams.
+When there are only m < n-1 given words, we start the procedure with the (m+1)-grams.
+
+We plan to implement the algorithm using trigrams, bigrams, and unigrams and estimate its accuracy (using cross-validation).
+
+To make the algorithm accessible we will build a Shiny app.
+The user can type in a number of words and the last words (at most three) are used to predict the next word.
