@@ -318,4 +318,4 @@ paste("Runtime:", format(as.numeric(toc - tic), digits = 1L, nsmall = 3L, width 
 
 Links to further ressources:
 
-[Milestone Report](https://rpubs.com/christian-thyssen/DataScienceCapstoneMilestoneReport) | [Slide Deck](TODO) | [App](TODO) | [Repository](TODO)
+[Milestone Report](https://rpubs.com/christian-thyssen/DataScienceCapstoneMilestoneReport) | [Slide Deck](https://christian-thyssen.github.io/YetAnotherWordPredictoR/) | [App](https://christian-thyssen.shinyapps.io/YetAnotherWordPredictoR/) | [Repository](https://github.com/christian-thyssen/YetAnotherWordPredictoR)
