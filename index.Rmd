@@ -1,0 +1,321 @@
+---
+title: "Yet Another Word PredictoR"
+author: "Christian Thyssen"
+date: "`r Sys.Date()`"
+output: ioslides_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r libraries, include=FALSE}
+library(quanteda)
+library(dplyr)
+library(shiny)
+library(stringi)
+```
+
+```{r model, include=FALSE}
+env <- new.env()
+load_final_model <- function(env) {
+    load(file = "final_vocabulary.rds", envir = env)
+    load(file = "final_ngmats.rds", envir = env)
+    load(file = "final_svecs.rds", envir = env)
+}
+load_final_model(env)
+```
+
+```{r test_set, include=FALSE}
+create_corpus <- function(blogs_file_path, news_file_path, twitter_file_path) {
+    blogs_docs <- readLines(
+        blogs_file_path,
+        warn = FALSE,
+        encoding = "UTF-8",
+        skipNul = TRUE
+    )
+    news_docs <- readLines(
+        news_file_path,
+        warn = FALSE,
+        encoding = "UTF-8",
+        skipNul = TRUE
+    )
+    twitter_docs <- readLines(
+        twitter_file_path,
+        warn = FALSE,
+        encoding = "UTF-8",
+        skipNul = TRUE
+    )
+    rm(blogs_file_path, news_file_path, twitter_file_path)
+    
+    blogs_corp <- corpus(
+        blogs_docs,
+        docnames = paste0("blogs", 1:length(blogs_docs)),
+        docvars = data.frame(source = rep("blogs", length(blogs_docs)))
+    )
+    news_corp <- corpus(
+        news_docs,
+        docnames = paste0("news", 1:length(news_docs)),
+        docvars = data.frame(source = rep("news", length(news_docs)))
+    )
+    twitter_corp <- corpus(
+        twitter_docs,
+        docnames = paste0("twitter", 1:length(twitter_docs)),
+        docvars = data.frame(source = rep("twitter", length(twitter_docs)))
+    )
+    rm(blogs_docs, news_docs, twitter_docs)
+    
+    corp <- blogs_corp + news_corp + twitter_corp
+    rm(blogs_corp, news_corp, twitter_corp)
+    
+    corpus_reshape(corp, to = "sentences")
+}
+
+test_blogs_file_path <- file.path("final", "en_US", "test_en_US.blogs.txt")
+test_news_file_path <- file.path("final", "en_US", "test_en_US.news.txt")
+test_twitter_file_path <- file.path("final", "en_US", "test_en_US.twitter.txt")
+
+test_corp <- create_corpus(
+    test_blogs_file_path,
+    test_news_file_path,
+    test_twitter_file_path
+)
+
+rm(test_blogs_file_path, test_news_file_path, test_twitter_file_path)
+```
+
+```{r summary_functions, include=FALSE}
+calculate_accuracies <- function(env, corp, max_preds = 3) {
+    n <- length(env$ngmats)
+    toks <- create_tokens(corp)
+    toks <- replace_rare_tokens(env, toks)
+    ngrams <- tokens_ngrams(
+        tokens(lapply(toks, function(x) c(rep("<bos>", n - 1), x, "<eos>"))),
+        n,
+        concatenator = " "
+    )
+    freq <- featfreq(dfm(ngrams))
+    ngmat <- matrix(
+        match(unlist(strsplit(names(freq), " ")), env$vocabulary),
+        ncol = n,
+        byrow = TRUE,
+        dimnames = list(NULL, paste0("word", 1:n))
+    )
+    freq <- as.integer(freq)
+    accuracies <- rep(0L, max_preds)
+    runtimes <- rep(0, nrow(ngmat))
+    for (i in 1:nrow(ngmat)) {
+        tic <- Sys.time()
+        pred <- predict_next_word_for_encoded_ngram(
+            env,
+            ngmat[i, 1:(n - 1)],
+            max_preds,
+            length(env$ngmats)
+        )
+        toc <- Sys.time()
+        pred <- pull(pred, "word")
+        for (j in 1:max_preds) {
+            if (ngmat[i, n] %in% pred[1:j]) {
+                accuracies[j] <- accuracies[j] + freq[i]
+            }
+        }
+        runtimes[i] <- toc - tic
+    }
+    list(accuracies = accuracies / sum(freq), runtimes = runtimes)
+}
+
+create_summary_of_algorithm <- function(env, corp, max_preds = 3) {
+    overall_summary <- tibble(
+        size = format(object.size(env$vocabulary) + object.size(env$ngmats) + object.size(env$svecs),
+                      units = "auto",
+                      standard = "SI")
+    )
+    
+    result <- calculate_accuracies(env, corp, max_preds)
+    
+    overall_summary <- cbind(
+        overall_summary,
+        paste(format(min(result[["runtimes"]]), digits = 1L, nsmall = 3L), "s")
+    )
+    overall_summary <- cbind(
+        overall_summary,
+        paste(format(mean(result[["runtimes"]]), digits = 1L, nsmall = 3L), "s")
+    )
+    overall_summary <- cbind(
+        overall_summary,
+        paste(format(max(result[["runtimes"]]), digits = 1L, nsmall = 3L), "s")
+    )
+    colnames(overall_summary)[(1 + 1):(1 + 3)] <- c("min.rt", "mean.rt", "max.rt")
+    
+    for (i in 1:max_preds) {
+        overall_summary <- cbind(
+            overall_summary,
+            paste(format(result[["accuracies"]][i] * 100, digits = 3L, nsmall = 1L), "%")
+        )
+    }
+    colnames(overall_summary)[(1 + 3 + 1):(1 + 3 + max_preds)] <- paste0("acc.", 1:max_preds)
+    
+    overall_summary
+}
+```
+
+```{r prediction_functions, include=FALSE}
+create_tokens <- function(corp) {
+    toks <- tokens(
+        corp,
+        remove_punct = TRUE,
+        remove_symbols = TRUE,
+        remove_numbers = TRUE,
+        remove_url = TRUE,
+        remove_separators = TRUE
+    )
+    toks <- tokens_tolower(toks)
+    ts <- types(toks)
+    toks <- tokens_replace(toks, ts, stri_trans_general(ts, "latin-ascii"), "fixed")
+    toks
+}
+
+replace_rare_tokens <- function(env, toks) {
+    ts <- types(toks)
+    tokens_replace(toks, ts, if_else(ts %in% env$vocabulary, ts, "<unk>"))
+}
+
+encode_sentence <- function(env, sentence, n) {
+    toks <- create_tokens(sentence)
+    toks <- replace_rare_tokens(env, toks)
+    toks <- as.character(toks)
+    if (length(toks) < n) toks <- c(rep("<bos>", n - length(toks)), toks)
+    if (length(toks) > n) toks <- toks[(length(toks) - n + 1):length(toks)]
+    match(toks, env$vocabulary)
+}
+
+predict_next_word_for_encoded_ngram <- function(env, ngram, max_preds, max_length) {
+    pred_words <- tibble(
+        word <- integer(),
+        score <- double(),
+        n <- integer(),
+        ngram <- character()
+    )
+    
+    for (i in max_length:1) {
+        indices <- 1:nrow(env$ngmats[[i]])
+        
+        # Remove indices of i-grams not starting with the n-gram.
+        if (i > 1) {
+            for (j in 1:(i - 1)) {
+                int <- findInterval(c(ngram[j] - 1, ngram[j]), env$ngmats[[i]][indices, paste0("word", j)])
+                if (int[1] < int[2]) {
+                    indices <- indices[(int[1] + 1):int[2]]
+                } else {
+                    indices <- integer()
+                    break
+                }
+            }
+        }
+        
+        # Remove indices of i-grams ending with an already predicted word.
+        if (nrow(pred_words) > 0) {
+            indices <- indices[which(!(env$ngmats[[i]][indices, paste0("word", i)] %in% pull(pred_words, "word")))]
+        }
+        
+        # Add new predictions to predicted words.
+        if (length(indices) > 0) {
+            # Sort matching n-grams in descending order of their scores.
+            indices <- indices[order(env$svecs[[i]][indices], decreasing = TRUE)]
+            
+            pred_words <- rbind(
+                pred_words,
+                tibble(
+                    word = env$ngmats[[i]][indices[1:min(max_preds - nrow(pred_words), length(indices))], paste0("word", i)],
+                    score = env$svecs[[i]][indices[1:min(max_preds - nrow(pred_words), length(indices))]],
+                    n = i,
+                    ngram = apply(
+                        env$ngmats[[i]][indices[1:min(max_preds - nrow(pred_words), length(indices))], paste0("word", 1:i), drop = FALSE],
+                        1,
+                        function(x) paste0(x, collapse = " ")
+                    )
+                )
+            )
+        }
+        
+        # Stop or continue with a shorter n-gram.
+        if (nrow(pred_words) == max_preds) {
+            break
+        } else {
+            ngram <- ngram[-1]
+        }
+    }
+    
+    pred_words
+}
+
+predict_next_word_for_plain_text <- function(env, text, max_preds, max_length) {
+    last_sentence <- stri_extract_last_boundaries(paste0(text, " A"), type = "sentence")
+    last_sentence <- substr(last_sentence, 1, nchar(last_sentence) - 2)
+    encoded_ngram <- encode_sentence(env, last_sentence, max_length - 1)
+    pred_words <- predict_next_word_for_encoded_ngram(
+        env,
+        encoded_ngram,
+        max_preds,
+        max_length
+    )
+    pred_words[, "word"] <- env$vocabulary[pull(pred_words, "word")]
+    pred_words[, "ngram"] <- sapply(
+        strsplit(pull(pred_words, "ngram"), " "),
+        function(x) paste0(env$vocabulary[as.integer(x)], collapse = " ")
+    )
+    pred_words
+}
+```
+
+## Model
+
+- We built a model for predicting the next word:
+- Model Part 1: A vocabulary containing 30,000 words (and special words for begin-of-sentence, end-of-sentence, and unknown word).
+- Model Part 2: Five matrices containing the most common n-grams (n = 1, ..., 5).
+- Model Part 3: Five vectors containing the scores of the n-grams (according to "Stupid Backoff", i. e., relative frequencies with a backoff factor to penalize shorter n-grams).
+- We used 50 % of the provided text corpus to train the model.
+- We excluded sentences with profane words.
+- We excluded n-grams occurring less than 4 times.
+
+## Performance
+
+- The overall size of the model is relatively small (36 MB).
+- The runtime of the model is relatively fast (< 50 ms on a machine with an Intel Core i7-8700 CPU at 3.2 GHz).
+- Hence, the intended execution on smartphones seems possible.
+- The algorithm's performance with respect to size, runtime, and accuracy on a test set containing 0.01 % of the provided text corpus is as follows.
+
+```{r performance_summary}
+create_summary_of_algorithm(env, test_corp)
+```
+
+## App 1
+
+Our application has the following features:
+
+- The app shows 1 to 10 predictions of the next word, which is configurable by the user.
+- Besides the predicted words the result contains the corresponding n-grams and their score (for better traceability).
+- The user can choose the maximum length of the n-grams the algorithm uses (between 1 and 5). The longer the n-grams, the more context is taken into account.
+- The app shows the runtime of the last prediction.
+- The app shows some facts about the underlying model.
+- The app includes a help page for getting started.
+
+## App 2
+
+Here is an example of the algorithm's predictive capabilities:
+
+```{r prediction_example}
+(text <- "to be or not to")
+
+tic <- Sys.time()
+
+predict_next_word_for_plain_text(env, text, 3, 5)
+
+toc <- Sys.time()
+
+paste("Runtime:", format(as.numeric(toc - tic), digits = 1L, nsmall = 3L, width = 5L), "s")
+```
+
+Links to further ressources:
+
+[Milestone Report](https://rpubs.com/christian-thyssen/DataScienceCapstoneMilestoneReport) | [Slide Deck](TODO) | [App](TODO) | [Repository](TODO)
